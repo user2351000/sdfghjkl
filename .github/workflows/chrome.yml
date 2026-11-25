@@ -1,0 +1,118 @@
+name: Chrome
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: chrome-desktop-session
+  cancel-in-progress: false
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  desktop:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Find previous Chrome profile
+        id: previous-profile
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CHROME_STATE_ENCRYPTION_KEY: ${{ secrets.CHROME_STATE_ENCRYPTION_KEY }}
+        run: node .github/scripts/chrome-state.js find
+
+      - name: Download previous Chrome profile
+        if: steps.previous-profile.outputs.run-id != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: chrome-profile-state
+          path: ${{ runner.temp }}/chrome-profile-state-download
+          run-id: ${{ steps.previous-profile.outputs.run-id }}
+          github-token: ${{ github.token }}
+
+      - name: Restore Chrome profile
+        env:
+          CHROME_STATE_ENCRYPTION_KEY: ${{ secrets.CHROME_STATE_ENCRYPTION_KEY }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/chrome-profile"
+          encrypted="$RUNNER_TEMP/chrome-profile-state-download/chrome-profile-state.enc"
+          if [ -f "$encrypted" ]; then
+            node .github/scripts/chrome-state.js decrypt \
+              "$encrypted" "$RUNNER_TEMP/chrome-profile-state.tar.gz"
+            tar -xzf "$RUNNER_TEMP/chrome-profile-state.tar.gz" \
+              --no-same-owner --no-same-permissions \
+              -C "$RUNNER_TEMP/chrome-profile"
+          else
+            echo "No previous Chrome profile found; starting with an empty profile."
+          fi
+
+      - name: Get Selkies release
+        id: selkies
+        run: |
+          version="$(curl -fsSL https://raw.githubusercontent.com/linuxserver/docker-baseimage-selkies/master/Dockerfile \
+            | sed -n 's/^ARG SELKIES_RELEASE=//p' \
+            | head -n 1)"
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Could not determine the Selkies release from the baseimage Dockerfile." >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Build Chrome with reduced touchpad scroll sensitivity
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          docker build \
+            --build-arg SELKIES_RELEASE="${{ steps.selkies.outputs.version }}" \
+            --secret id=github_token,env=GITHUB_TOKEN \
+            --file .github/docker/chrome-touchpad-scroll.Dockerfile \
+            --tag local/chrome-touchpad-scroll \
+            .
+
+      - name: Start Docker
+        id: start-chrome
+        run: |
+          docker run -d \
+            --name chrome \
+            --network host \
+            --security-opt seccomp=unconfined \
+            --shm-size=1gb \
+            --restart unless-stopped \
+            --volume "$RUNNER_TEMP/chrome-profile:/config" \
+            -e PUID="$(id -u)" \
+            -e PGID="$(id -g)" \
+            -e CHROME_CLI=https://duckduckgo.com/ \
+            local/chrome-touchpad-scroll
+
+      - name: Desktop URL https://<random-subdomain>.trycloudflare.com / Save profile and stop by opening http://127.0.0.1/
+        run: |
+          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i cloudflared-linux-amd64.deb >/dev/null 2>&1
+          echo "<?php passthru('pkill cloudflared');" > index.php
+          sudo nohup php -S 0.0.0.0:80 2>/dev/null &
+          cloudflared tunnel --url http://localhost:3000
+
+      - name: Save Chrome profile
+        if: always() && steps.start-chrome.outcome == 'success'
+        env:
+          CHROME_STATE_ENCRYPTION_KEY: ${{ secrets.CHROME_STATE_ENCRYPTION_KEY }}
+        run: |
+          docker stop chrome
+          tar -czf "$RUNNER_TEMP/chrome-profile-state.tar.gz" \
+            -C "$RUNNER_TEMP/chrome-profile" .
+          node .github/scripts/chrome-state.js encrypt \
+            "$RUNNER_TEMP/chrome-profile-state.tar.gz" \
+            "$RUNNER_TEMP/chrome-profile-state.enc"
+
+      - name: Upload encrypted Chrome profile
+        if: always() && steps.start-chrome.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: chrome-profile-state
+          path: ${{ runner.temp }}/chrome-profile-state.enc
+          retention-days: 90
+          compression-level: 0
+          if-no-files-found: error

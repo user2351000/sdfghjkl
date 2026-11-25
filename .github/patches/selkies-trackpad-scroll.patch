@@ -1,0 +1,11 @@
+diff --git a/addons/selkies-web-core/lib/input.js b/addons/selkies-web-core/lib/input.js
+index 523b74c..56e9971 100644
+--- a/addons/selkies-web-core/lib/input.js
++++ b/addons/selkies-web-core/lib/input.js
+@@ -167,0 +168 @@ const FINGER_SCROLL_END_MS = 200;
++const FINGER_SCROLL_SENSITIVITY = 0.5;
+@@ -4953,2 +4954,2 @@ export class Input {
+-        const dx = event.deltaX * scale.x;
+-        const dy = event.deltaY * scale.y;
++        const dx = event.deltaX * scale.x * FINGER_SCROLL_SENSITIVITY;
++        const dy = event.deltaY * scale.y * FINGER_SCROLL_SENSITIVITY;
